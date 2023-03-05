@@ -4,6 +4,7 @@ import telegram
 import requests
 import time
 import logging
+from http import HTTPStatus
 
 from logging import StreamHandler
 
@@ -15,7 +16,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 handler = StreamHandler(stream=sys.stdout)
 formatter = logging.Formatter(
-    '%(asctime)s - [%(levelname)s] - %(message)s'
+    '%(asctime)s - [%(levelname)s] - %(pathname)s:%(lineno)d - %(message)s'
 )
 handler.setFormatter(formatter)
 logger.addHandler(handler)
@@ -37,12 +38,33 @@ HOMEWORK_VERDICTS = {
 }
 
 
+class Error(Exception):
+    """Свой класс - исключение."""
+
+    def __init__(self, message):
+        """Инициализация."""
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        """Строковое описание ошибки."""
+        return self.message
+
+
+class BotConnectionError(Error):
+    """Ошибка подключения бота."""
+
+
+class BotMessageError(Error):
+    """Ошибка отправки сообщения ботом."""
+
+
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    if None in (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
-        logger.critical('Отсутствуют обязательные переменные окружения')
-        return False
-    return True
+    if all((PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)):
+        return True
+    logger.critical('Отсутствуют обязательные переменные окружения')
+    return False
 
 
 def send_message(bot, message):
@@ -52,6 +74,7 @@ def send_message(bot, message):
         logger.debug('Сообщение Telegram отправленно')
     except Exception:
         logger.error('Сбой при отправке сообщения в Telegram')
+        raise BotMessageError('Сбой при отправке сообщения в Telegram')
 
 
 def get_api_answer(timestamp):
@@ -62,15 +85,15 @@ def get_api_answer(timestamp):
             ENDPOINT, headers=HEADERS, params=PAYLOAD
         )
     except requests.exceptions.RequestException:
-        logger.error('Недоступность эндпоинта Yandex Practikum')
+        raise BotConnectionError('Недоступность эндпоинта Yandex Practikum')
     else:
-        if homework_status.status_code == 200:
+        if homework_status.status_code == HTTPStatus.OK:
             return homework_status.json()
         else:
-            message = (f'Ожидаемый код: 200, но вернулся код: '
+            message = (f'Ожидаемый код: {HTTPStatus.OK}, но вернулся код: '
                        f'{homework_status.status_code}')
             logger.error(message)
-            raise requests.ConnectionError(message)
+            raise BotConnectionError(message)
 
 
 def check_response(response):
@@ -83,6 +106,10 @@ def check_response(response):
     if type(homeworks) is not list:
         raise TypeError(
             'В ответе API домашки под ключом "homeworks" данные не списком.')
+    if len(homeworks) == 0:
+        raise ValueError(
+            'Список homeworks пустой.'
+        )
     for k in ('current_date', 'homeworks'):
         if k not in response:
             message = f'Отсутствие ожидаемого ключа {k} в ответе API'
@@ -106,7 +133,6 @@ def parse_status(homework):
         logger.error(f'Неожиданный статус домашней работы '
                      f'"{status}", обнаруженный в ответе API')
         raise KeyError('status')
-    print(verdict, '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
@@ -121,8 +147,10 @@ def main():
         try:
             response = get_api_answer(timestamp)
             homework = check_response(response)
-            if current_status != homework[0].get('status'):
+            new_status = homework[0].get('status')
+            if current_status != new_status:
                 answer = parse_status(response.get('homeworks')[0])
+                current_status = new_status
                 send_message(bot, answer)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
